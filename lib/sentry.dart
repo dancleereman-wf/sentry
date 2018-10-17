@@ -6,13 +6,10 @@
 library sentry;
 
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 
-import 'package:http/http.dart';
 import 'package:meta/meta.dart';
-import 'package:quiver/time.dart';
 import 'package:usage/uuid/uuid.dart';
+import 'package:w_transport/w_transport.dart';
 
 import 'src/stack_trace.dart';
 import 'src/utils.dart';
@@ -45,9 +42,6 @@ class SentryClient {
   /// If [httpClient] is provided, it is used instead of the default client to
   /// make HTTP calls to Sentry.io. This is useful in tests.
   ///
-  /// If [clock] is provided, it is used to get time instead of the system
-  /// clock. This is useful in tests.
-  ///
   /// If [uuidGenerator] is provided, it is used to generate the "event_id"
   /// field instead of the built-in random UUID v4 generator. This is useful in
   /// tests.
@@ -55,12 +49,10 @@ class SentryClient {
     @required String dsn,
     Event environmentAttributes,
     bool compressPayload,
-    Client httpClient,
-    Clock clock,
+    JsonRequest httpClient,
     UuidGenerator uuidGenerator,
   }) {
-    httpClient ??= new Client();
-    clock ??= const Clock(_getUtcDateTime);
+    httpClient ??= new JsonRequest();
     uuidGenerator ??= _generateUuidV4WithoutDashes;
     compressPayload ??= true;
 
@@ -73,8 +65,7 @@ class SentryClient {
             'Colon-separated publicKey:secretKey pair not found in the user info field of the DSN URI: $dsn');
 
       if (uri.pathSegments.isEmpty)
-        throw new ArgumentError(
-            'Project ID not found in the URI path of the DSN URI: $dsn');
+        throw new ArgumentError('Project ID not found in the URI path of the DSN URI: $dsn');
 
       return true;
     }());
@@ -85,7 +76,6 @@ class SentryClient {
 
     return new SentryClient._(
       httpClient: httpClient,
-      clock: clock,
       uuidGenerator: uuidGenerator,
       environmentAttributes: environmentAttributes,
       dsnUri: uri,
@@ -97,8 +87,7 @@ class SentryClient {
   }
 
   SentryClient._({
-    @required Client httpClient,
-    @required Clock clock,
+    @required JsonRequest httpClient,
     @required UuidGenerator uuidGenerator,
     @required this.environmentAttributes,
     @required this.dsnUri,
@@ -108,11 +97,9 @@ class SentryClient {
     @required this.projectId,
   })
       : _httpClient = httpClient,
-        _clock = clock,
         _uuidGenerator = uuidGenerator;
 
-  final Client _httpClient;
-  final Clock _clock;
+  final JsonRequest _httpClient;
   final UuidGenerator _uuidGenerator;
 
   /// Contains [Event] attributes that are automatically mixed into all events
@@ -145,52 +132,43 @@ class SentryClient {
   final String projectId;
 
   @visibleForTesting
-  String get postUri =>
-      '${dsnUri.scheme}://${dsnUri.host}/api/$projectId/store/';
+  String get postUri => '${dsnUri.scheme}://${dsnUri.host}/api/$projectId/store/';
+
+  String _getAuthHeader() =>
+      'Sentry sentry_version=7,' +
+      'sentry_timestamp=${new DateTime.now().toUtc().millisecondsSinceEpoch},' +
+      'sentry_key=${publicKey}';
 
   /// Reports an [event] to Sentry.io.
   Future<SentryResponse> capture({@required Event event}) async {
-    final DateTime now = _clock.now();
     final Map<String, String> headers = <String, String>{
-      'User-Agent': '$sentryClient',
       'Content-Type': 'application/json',
-      'X-Sentry-Auth': 'Sentry sentry_version=6, '
-          'sentry_client=$sentryClient, '
-          'sentry_timestamp=${now.millisecondsSinceEpoch}, '
-          'sentry_key=$publicKey, '
-          'sentry_secret=$secretKey',
+      'X-Sentry-Auth': _getAuthHeader(),
     };
 
-    final Map<String, dynamic> json = <String, dynamic>{
+    final Map<String, dynamic> body = <String, dynamic>{
       'project': projectId,
       'event_id': _uuidGenerator(),
-      'timestamp': formatDateAsIso8601WithSecondPrecision(_clock.now()),
+      'timestamp': formatDateAsIso8601WithSecondPrecision(new DateTime.now().toUtc()),
       'logger': defaultLoggerName,
     };
 
-    if (environmentAttributes != null)
-      mergeAttributes(environmentAttributes.toJson(), into: json);
+    if (environmentAttributes != null) mergeAttributes(environmentAttributes.toJson(), into: body);
 
-    mergeAttributes(event.toJson(), into: json);
+    mergeAttributes(event.toJson(), into: body);
 
-    List<int> body = UTF8.encode(JSON.encode(json));
-    if (compressPayload) {
-      headers['Content-Encoding'] = 'gzip';
-      body = GZIP.encode(body);
-    }
+    _httpClient.uri = Uri.parse(postUri);
+    _httpClient.headers = headers;
+    _httpClient.body = body;
+    final Response response = await _httpClient.post();
 
-    final Response response =
-        await _httpClient.post(postUri, headers: headers, body: body);
-
-    if (response.statusCode != 200) {
-      String errorMessage =
-          'Sentry.io responded with HTTP ${response.statusCode}';
-      if (response.headers['x-sentry-error'] != null)
-        errorMessage += ': ${response.headers['x-sentry-error']}';
+    if (response.status != 200) {
+      String errorMessage = 'Sentry.io responded with HTTP ${response.status}';
+      if (response.headers['x-sentry-error'] != null) errorMessage += ': ${response.headers['x-sentry-error']}';
       return new SentryResponse.failure(errorMessage);
     }
 
-    final String eventId = JSON.decode(response.body)['id'];
+    final String eventId = response.body.asJson()['id'];
     return new SentryResponse.success(eventId: eventId);
   }
 
@@ -207,7 +185,7 @@ class SentryClient {
   }
 
   Future<Null> close() async {
-    _httpClient.close();
+    _httpClient.done;
   }
 
   @override
@@ -241,8 +219,7 @@ class SentryResponse {
 
 typedef UuidGenerator = String Function();
 
-String _generateUuidV4WithoutDashes() =>
-    new Uuid().generateV4().replaceAll('-', '');
+String _generateUuidV4WithoutDashes() => new Uuid().generateV4().replaceAll('-', '');
 
 /// Severity of the logged [Event].
 @immutable
@@ -258,10 +235,6 @@ class SeverityLevel {
   /// API name of the level as it is encoded in the JSON protocol.
   final String name;
 }
-
-/// Sentry does not take a timezone and instead expects the date-time to be
-/// submitted in UTC timezone.
-DateTime _getUtcDateTime() => new DateTime.now().toUtc();
 
 /// An event to be reported to Sentry.io.
 @immutable
@@ -390,8 +363,7 @@ class Event {
 
     if (extra != null && extra.isNotEmpty) json['extra'] = extra;
 
-    if (fingerprint != null && fingerprint.isNotEmpty)
-      json['fingerprint'] = fingerprint;
+    if (fingerprint != null && fingerprint.isNotEmpty) json['fingerprint'] = fingerprint;
 
     return json;
   }

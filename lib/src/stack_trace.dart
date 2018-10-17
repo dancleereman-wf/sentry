@@ -15,9 +15,7 @@ const Map<String, dynamic> asynchronousGapFrameJson = const <String, dynamic>{
 /// [stackTrace] must be [String] or [StackTrace].
 List<Map<String, dynamic>> encodeStackTrace(dynamic stackTrace) {
   assert(stackTrace is String || stackTrace is StackTrace);
-  final Chain chain = stackTrace is StackTrace
-      ? new Chain.forTrace(stackTrace)
-      : new Chain.parse(stackTrace);
+  final Chain chain = stackTrace is StackTrace ? new Chain.forTrace(stackTrace) : new Chain.parse(stackTrace);
 
   final List<Map<String, dynamic>> frames = <Map<String, dynamic>>[];
   for (int t = 0; t < chain.traces.length; t += 1) {
@@ -35,8 +33,7 @@ Map<String, dynamic> encodeStackTraceFrame(Frame frame) {
     'in_app': !frame.isCore,
   };
 
-  if (frame.uri.pathSegments.isNotEmpty)
-    json['filename'] = frame.uri.pathSegments.last;
+  if (frame.uri.pathSegments.isNotEmpty) json['filename'] = frame.uri.pathSegments.last;
 
   return json;
 }
@@ -50,8 +47,7 @@ Map<String, dynamic> encodeStackTraceFrame(Frame frame) {
 /// "dart:" and "package:" imports are always relative and are OK to send in
 /// full.
 String _absolutePathForCrashReport(Frame frame) {
-  if (frame.uri.scheme != 'dart' && frame.uri.scheme != 'package')
-    return frame.uri.pathSegments.last;
+  if (frame.uri.scheme != 'dart' && frame.uri.scheme != 'package') return frame.uri.pathSegments.last;
 
   return '${frame.uri}';
 }

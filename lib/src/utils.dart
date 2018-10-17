@@ -8,8 +8,7 @@ import 'package:meta/meta.dart';
 ///
 /// [attributes] take precedence over the target map. Recursion takes place
 /// along [Map] values only. All other types are overwritten entirely.
-void mergeAttributes(Map<String, dynamic> attributes,
-    {@required Map<String, dynamic> into}) {
+void mergeAttributes(Map<String, dynamic> attributes, {@required Map<String, dynamic> into}) {
   assert(attributes != null && into != null);
   attributes.forEach((String name, dynamic value) {
     final dynamic targetValue = into[name];
@@ -24,7 +23,6 @@ void mergeAttributes(Map<String, dynamic> attributes,
 String formatDateAsIso8601WithSecondPrecision(DateTime date) {
   String iso = date.toIso8601String();
   final millisecondSeparatorIndex = iso.lastIndexOf('.');
-  if (millisecondSeparatorIndex != -1)
-    iso = iso.substring(0, millisecondSeparatorIndex);
+  if (millisecondSeparatorIndex != -1) iso = iso.substring(0, millisecondSeparatorIndex);
   return iso;
 }
