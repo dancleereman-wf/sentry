@@ -7,8 +7,11 @@ library sentry;
 
 import 'dart:async';
 
+import 'package:app_intelligence/app_intelligence_browser.dart';
+import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 import 'package:usage/uuid/uuid.dart';
+import 'package:w_transport/browser.dart' show browserTransportPlatform;
 import 'package:w_transport/w_transport.dart';
 
 import 'src/stack_trace.dart';
@@ -23,21 +26,14 @@ class SentryClient {
   @visibleForTesting
   static const String sentryClient = '$sdkName/$sdkVersion';
 
-  /// The default logger name used if no other value is supplied.
-  static const String defaultLoggerName = 'SentryClient';
-
   /// Instantiates a client using [dsn] issued to your project by Sentry.io as
   /// the endpoint for submitting events.
   ///
   /// [environmentAttributes] contain event attributes that do not change over
   /// the course of a program's lifecycle. These attributes will be added to
   /// all events captured via this client. The following attributes often fall
-  /// under this category: [Event.loggerName], [Event.serverName],
-  /// [Event.release], [Event.environment].
-  ///
-  /// If [compressPayload] is `true` the outgoing HTTP payloads are compressed
-  /// using gzip. Otherwise, the payloads are sent in plain UTF8-encoded JSON
-  /// text. If not specified, the compression is enabled by default.
+  /// under this category: [SentryEvent.loggerName], [SentryEvent.serverName],
+  /// [SentryEvent.release], [SentryEvent.environment].
   ///
   /// If [httpClient] is provided, it is used instead of the default client to
   /// make HTTP calls to Sentry.io. This is useful in tests.
@@ -47,14 +43,14 @@ class SentryClient {
   /// tests.
   factory SentryClient({
     @required String dsn,
-    Event environmentAttributes,
-    bool compressPayload,
+    SentryEvent environmentAttributes,
     JsonRequest httpClient,
     UuidGenerator uuidGenerator,
+    Logger logger,
   }) {
-    httpClient ??= new JsonRequest();
+    httpClient ??= browserTransportPlatform.newJsonRequest();
     uuidGenerator ??= _generateUuidV4WithoutDashes;
-    compressPayload ??= true;
+    logger ??= new Logger('');
 
     final Uri uri = Uri.parse(dsn);
     final List<String> userInfo = uri.userInfo.split(':');
@@ -77,42 +73,44 @@ class SentryClient {
     return new SentryClient._(
       httpClient: httpClient,
       uuidGenerator: uuidGenerator,
+      logger: logger,
       environmentAttributes: environmentAttributes,
       dsnUri: uri,
       publicKey: publicKey,
       secretKey: secretKey,
       projectId: projectId,
-      compressPayload: compressPayload,
     );
   }
 
   SentryClient._({
     @required JsonRequest httpClient,
     @required UuidGenerator uuidGenerator,
+    @required Logger logger,
     @required this.environmentAttributes,
     @required this.dsnUri,
     @required this.publicKey,
     @required this.secretKey,
-    @required this.compressPayload,
     @required this.projectId,
   })
       : _httpClient = httpClient,
-        _uuidGenerator = uuidGenerator;
+        _uuidGenerator = uuidGenerator,
+        _logger = logger;
 
   final JsonRequest _httpClient;
   final UuidGenerator _uuidGenerator;
+  final Logger _logger;
 
-  /// Contains [Event] attributes that are automatically mixed into all events
+  SentryEvent _sentryEvent = new SentryEvent();
+  SentryEvent get sentryEvent => _sentryEvent;
+
+  /// Contains [SentryEvent] attributes that are automatically mixed into all events
   /// captured through this client.
   ///
   /// This event is designed to contain static values that do not change from
   /// event to event, such as local operating system version, the version of
   /// Dart/Flutter SDK, etc. These attributes have lower precedence than those
   /// supplied in the even passed to [capture].
-  final Event environmentAttributes;
-
-  /// Whether to compress payloads sent to Sentry.io.
-  final bool compressPayload;
+  final SentryEvent environmentAttributes;
 
   /// The DSN URI.
   @visibleForTesting
@@ -140,7 +138,7 @@ class SentryClient {
       'sentry_key=${publicKey}';
 
   /// Reports an [event] to Sentry.io.
-  Future<SentryResponse> capture({@required Event event}) async {
+  Future<SentryResponse> capture({@required SentryEvent event}) async {
     final Map<String, String> headers = <String, String>{
       'Content-Type': 'application/json',
       'X-Sentry-Auth': _getAuthHeader(),
@@ -149,11 +147,13 @@ class SentryClient {
     final Map<String, dynamic> body = <String, dynamic>{
       'project': projectId,
       'event_id': _uuidGenerator(),
-      'timestamp': formatDateAsIso8601WithSecondPrecision(new DateTime.now().toUtc()),
-      'logger': defaultLoggerName,
+      'timestamp': formatDateAsIso8601WithSecondPrecision(
+          new DateTime.now().toUtc()),
+      'logger': event.loggerName,
     };
 
-    if (environmentAttributes != null) mergeAttributes(environmentAttributes.toJson(), into: body);
+    if (environmentAttributes != null) mergeAttributes(
+        environmentAttributes.toJson(), into: body);
 
     mergeAttributes(event.toJson(), into: body);
 
@@ -164,24 +164,59 @@ class SentryClient {
 
     if (response.status != 200) {
       String errorMessage = 'Sentry.io responded with HTTP ${response.status}';
-      if (response.headers['x-sentry-error'] != null) errorMessage += ': ${response.headers['x-sentry-error']}';
-      return new SentryResponse.failure(errorMessage);
+      if (response.headers['x-sentry-error'] != null) {
+        errorMessage += ': ${response.headers['x-sentry-error']}';
+        return new SentryResponse.failure(errorMessage);
+      }
     }
 
     final String eventId = response.body.asJson()['id'];
     return new SentryResponse.success(eventId: eventId);
   }
 
+
   /// Reports the [exception] and optionally its [stackTrace] to Sentry.io.
   Future<SentryResponse> captureException({
     @required dynamic exception,
     dynamic stackTrace,
+    String message,
   }) {
-    final Event event = new Event(
+    final SentryEvent event = new SentryEvent(
+      message: message,
       exception: exception,
       stackTrace: stackTrace,
+      loggerName: _logger.fullName,
+      tags: sentryEvent.tags,
     );
     return capture(event: event);
+  }
+
+  void init(List<Interceptor> interceptors) {
+    Map tags = {};
+    for (Interceptor interceptor in interceptors) {
+      switch (interceptor.name) {
+        case 'AppInterceptor':
+          tags.addAll({
+            'appId': (interceptor as AppInterceptor).appId,
+            'appName': (interceptor as AppInterceptor).appName,
+            'appVersion': (interceptor as AppInterceptor).appVersion
+          });
+          break;
+        case 'BrowserInterceptor':
+          tags.addAll({
+            'browserSource': (interceptor as BrowserInterceptor).browserSource,
+            'browserString': (interceptor as BrowserInterceptor).browserString,
+            'flashVersion': (interceptor as BrowserInterceptor).flashVersion,
+            'screenOrientation': (interceptor as BrowserInterceptor).screenOrientation,
+            'screenResolution': (interceptor as BrowserInterceptor).screenResolution,
+            'tabId': (interceptor as BrowserInterceptor).tabId,
+            'viewport': (interceptor as BrowserInterceptor).viewport,
+            'windowId': (interceptor as BrowserInterceptor).windowId
+          });
+          break;
+      }
+    }
+    _sentryEvent = new SentryEvent(tags: tags);
   }
 
   Future<Null> close() async {
@@ -221,7 +256,7 @@ typedef UuidGenerator = String Function();
 
 String _generateUuidV4WithoutDashes() => new Uuid().generateV4().replaceAll('-', '');
 
-/// Severity of the logged [Event].
+/// Severity of the logged [SentryEvent].
 @immutable
 class SeverityLevel {
   static const fatal = const SeverityLevel._('fatal');
@@ -238,7 +273,7 @@ class SeverityLevel {
 
 /// An event to be reported to Sentry.io.
 @immutable
-class Event {
+class SentryEvent {
   /// Refers to the default fingerprinting algorithm.
   ///
   /// You do not need to specify this value unless you supplement the default
@@ -246,7 +281,7 @@ class Event {
   static const String defaultFingerprint = '{{ default }}';
 
   /// Creates an event.
-  const Event({
+  const SentryEvent({
     this.loggerName,
     this.serverName,
     this.release,
@@ -273,7 +308,7 @@ class Event {
   /// The environment that logged the event, e.g. "production", "staging".
   final String environment;
 
-  /// Event message.
+  /// SentryEvent message.
   ///
   /// Generally an event either contains a [message] or an [exception].
   final String message;
@@ -317,7 +352,7 @@ class Event {
   ///     // A completely custom fingerprint:
   ///     var custom = ['foo', 'bar', 'baz'];
   ///     // A fingerprint that supplements the default one with value 'foo':
-  ///     var supplemented = [Event.defaultFingerprint, 'foo'];
+  ///     var supplemented = [SentryEvent.defaultFingerprint, 'foo'];
   final List<String> fingerprint;
 
   /// Serializes this event to JSON.

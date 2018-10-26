@@ -8,6 +8,11 @@ environment:
   sdk: 1.24.3
 
 dependencies:
+  app_intelligence:
+    hosted:
+      name: app_intelligence
+      url: https://pub.workiva.org
+    version: ^2.19.0
   meta: ">=1.0.0 <2.0.0"
   stack_trace: ">=1.0.0 <2.0.0"
   usage: ">=3.0.0 <4.0.0"
